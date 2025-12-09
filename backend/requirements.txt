@@ -25,5 +25,5 @@ asyncio==3.4.3
 aiofiles==23.2.1
 
 # Logging & Monitoring
-python-logging==0.5.1.2
+
 python-dotenv==1.0.0

@@ -5,3 +5,10 @@ secrets.txt
 musetalk.png
 *.png
 COMPLETE-SETUP-GUIDE.md
+venv/
+__pycache__/
+*.pyc
+backend/data
+backend/media/images
+backend/media/videos
+frontend/node_modules/
