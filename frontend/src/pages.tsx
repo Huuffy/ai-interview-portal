@@ -1,8 +1,4 @@
 import React, { useState, useEffect } from 'react'
-import { setupInterview, getResults, connectWebSocket } from './services'
-import { useWebSocket } from './hooks'
-import { useTimer } from './hooks'
-import { VideoPlayer, Timer, Transcription, Results } from './components'
 
 // ===== SETUP PAGE =====
 export const SetupPage: React.FC<{ onStart: (data: any) => void }> = ({ onStart }) => {
@@ -22,7 +18,8 @@ export const SetupPage: React.FC<{ onStart: (data: any) => void }> = ({ onStart 
     setError('')
 
     try {
-      const response = await fetch(`${import.meta.env.VITE_API_URL}/api/interview/setup`, {
+      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+      const response = await fetch(`${apiUrl}/api/interview/setup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -45,41 +42,58 @@ export const SetupPage: React.FC<{ onStart: (data: any) => void }> = ({ onStart 
 
   return (
     <div className="setup-container">
-      <h1>🎬 AI Interview Portal</h1>
-
-      <div className="form-group">
-        <label>Job Description</label>
-        <textarea
-          value={jobDesc}
-          onChange={(e) => setJobDesc(e.target.value)}
-          placeholder="Paste the job description or role details..."
-        />
+      <div className="setup-header">
+        <h1>🎬 AI Interview Portal</h1>
+        <p>Practice interviews with AI guidance</p>
       </div>
 
-      <div className="form-group">
-        <label>Your Name</label>
-        <input
-          type="text"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="Enter your full name"
-        />
-      </div>
+      <form onSubmit={(e) => { e.preventDefault(); handleStart(); }}>
+        <div className="form-group">
+          <label htmlFor="jobDesc">Job Description *</label>
+          <textarea
+            id="jobDesc"
+            value={jobDesc}
+            onChange={(e) => setJobDesc(e.target.value)}
+            placeholder="Paste the job description or role details you're interviewing for..."
+            required
+          />
+        </div>
 
-      <div className="form-group">
-        <label>Interview Duration</label>
-        <select value={duration} onChange={(e) => setDuration(Number(e.target.value))}>
-          <option value={5}>5 minutes</option>
-          <option value={10}>10 minutes</option>
-          <option value={15}>15 minutes</option>
-        </select>
-      </div>
+        <div className="form-group">
+          <label htmlFor="name">Your Name *</label>
+          <input
+            id="name"
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Enter your full name"
+            required
+          />
+        </div>
 
-      {error && <div style={{ color: 'red', marginBottom: '15px' }}>{error}</div>}
+        <div className="form-group">
+          <label htmlFor="duration">Interview Duration</label>
+          <select 
+            id="duration"
+            value={duration} 
+            onChange={(e) => setDuration(Number(e.target.value))}
+          >
+            <option value={5}>5 minutes</option>
+            <option value={10}>10 minutes</option>
+            <option value={15}>15 minutes</option>
+          </select>
+        </div>
 
-      <button onClick={handleStart} disabled={loading || !jobDesc || !name}>
-        {loading ? '⏳ Starting...' : '▶️ Start Interview'}
-      </button>
+        {error && <div className="error-message">{error}</div>}
+
+        <button 
+          type="submit" 
+          disabled={loading || !jobDesc.trim() || !name.trim()}
+          className="btn-primary"
+        >
+          {loading ? '⏳ Starting...' : '▶️ Start Interview'}
+        </button>
+      </form>
     </div>
   )
 }
@@ -96,25 +110,31 @@ export const InterviewPage: React.FC<{ sessionId: string; onComplete: () => void
   const [transcription, setTranscription] = useState('')
   const [evaluation, setEvaluation] = useState<any>(null)
   const [isListening, setIsListening] = useState(false)
-  const [ws, setWs] = useState<WebSocket | null>(null)
-  const [timer, setTimer] = useState(300) // 5 minutes default
+  const [timer, setTimer] = useState(300)
+  const [currentQuestion, setCurrentQuestion] = useState(0)
+  const [totalQuestions, setTotalQuestions] = useState(0)
 
   useEffect(() => {
-    // Connect to WebSocket
     const socket = new WebSocket(`${WS_URL}/ws/interview/${sessionId}`)
 
     socket.onopen = () => {
-      setWs(socket)
+      console.log('WebSocket connected')
       socket.send(JSON.stringify({ type: 'ready' }))
     }
 
     socket.onmessage = (event) => {
       const message = JSON.parse(event.data)
+      console.log('WebSocket message:', message.type)
 
       if (message.type === 'greeting_video' || message.type === 'question_video') {
         setVideoUrl(message.video_url)
         setEvaluation(null)
         setTranscription('')
+        setIsListening(false)
+        if (message.question_number) {
+          setCurrentQuestion(message.question_number)
+          setTotalQuestions(message.total_questions)
+        }
       } else if (message.type === 'transcription_partial') {
         setTranscription(message.text)
       } else if (message.type === 'evaluation') {
@@ -128,7 +148,10 @@ export const InterviewPage: React.FC<{ sessionId: string; onComplete: () => void
       console.error('WebSocket error:', error)
     }
 
-    // Timer interval
+    socket.onclose = () => {
+      console.log('WebSocket closed')
+    }
+
     const timerInterval = setInterval(() => {
       setTimer((prev) => (prev > 0 ? prev - 1 : 0))
     }, 1000)
@@ -139,59 +162,70 @@ export const InterviewPage: React.FC<{ sessionId: string; onComplete: () => void
         socket.close()
       }
     }
-  }, [sessionId, WS_URL])
+  }, [sessionId, WS_URL, onComplete])
 
   const handleVideoEnd = () => {
     setIsListening(true)
-    ws?.send(JSON.stringify({ type: 'listening_start' }))
-
-    // Start capturing audio
-    startAudioCapture()
+    setTimeout(() => {
+      startAudioCapture()
+    }, 500)
   }
 
   const startAudioCapture = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)()
-      const mediaStreamAudioSource = audioContext.createMediaStreamSource(stream)
+      const source = audioContext.createMediaStreamSource(stream)
       const processor = audioContext.createScriptProcessor(4096, 1, 1)
 
-      mediaStreamAudioSource.connect(processor)
+      source.connect(processor)
       processor.connect(audioContext.destination)
 
-      let recordedChunks: Uint8Array[] = []
-
-      processor.onaudioprocess = (event) => {
-        const data = event.inputData[0]
-        const chunk = new Uint8Array(data.buffer)
-        recordedChunks.push(chunk)
-
-        // Send chunk to WebSocket
-        ws?.send(
-          JSON.stringify({
-            type: 'audio_chunk',
-            data: btoa(String.fromCharCode(...chunk)),
-          })
-        )
+      processor.onaudioprocess = (event: AudioProcessingEvent) => {
+        // FIXED: Use getChannelData() instead of inputData
+        const channelData = event.inputBuffer.getChannelData(0)
+        const chunk = new Uint8Array(channelData.length)
+        for (let i = 0; i < channelData.length; i++) {
+          chunk[i] = Math.floor((channelData[i] + 1) * 128)
+        }
+        console.log('Audio chunk captured:', chunk.length)
       }
 
-      // Stop after 30 seconds or when user stops
       setTimeout(() => {
         processor.disconnect()
-        mediaStreamAudioSource.disconnect()
+        source.disconnect()
         stream.getTracks().forEach((track) => track.stop())
         setIsListening(false)
-        ws?.send(JSON.stringify({ type: 'audio_end' }))
       }, 30000)
     } catch (err) {
       console.error('Microphone error:', err)
-      alert('Please allow microphone access to continue')
+      alert('Please allow microphone access')
+      setIsListening(false)
     }
   }
 
+  const formatTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60)
+    const secs = seconds % 60
+    return `${mins}:${secs.toString().padStart(2, '0')}`
+  }
+
+  const progress = ((300 - timer) / 300) * 100
+
   return (
     <div className="interview-container">
-      <Timer remaining={timer} total={300} />
+      <div className="interview-header">
+        <div className="interview-title">
+          <h2>Interview in Progress</h2>
+          <p>Question {currentQuestion} of {totalQuestions || '...'}</p>
+        </div>
+        <div className="timer">
+          <span className="timer-text">⏱️ {formatTime(timer)}</span>
+          <div className="progress-bar">
+            <div className="progress-fill" style={{ width: `${progress}%` }} />
+          </div>
+        </div>
+      </div>
 
       {evaluation && (
         <div className="evaluation">
@@ -200,25 +234,30 @@ export const InterviewPage: React.FC<{ sessionId: string; onComplete: () => void
         </div>
       )}
 
-      {videoUrl && <VideoPlayer src={videoUrl} onEnded={handleVideoEnd} />}
+      {videoUrl && (
+        <div className="video-section">
+          <video
+            src={videoUrl}
+            autoPlay
+            onEnded={handleVideoEnd}
+            className="video-player"
+          />
+        </div>
+      )}
 
       {isListening && (
-        <>
-          <Transcription text={transcription} />
-          <div style={{ textAlign: 'center', marginTop: '20px' }}>
-            <div
-              style={{
-                display: 'inline-block',
-                width: '12px',
-                height: '12px',
-                borderRadius: '50%',
-                backgroundColor: '#f44336',
-                animation: 'pulse 1s infinite',
-              }}
-            />
-            <p style={{ marginTop: '10px', color: '#666' }}>Listening... Speak now</p>
-          </div>
-        </>
+        <div className="listening-indicator">
+          <div className="pulse" />
+          <p className="listening-text">🎤 Listening... Speak now</p>
+          <p style={{ fontSize: '12px', color: '#888' }}>You have 30 seconds</p>
+        </div>
+      )}
+
+      {transcription && (
+        <div className="transcription">
+          <strong>📝 Your Response:</strong>
+          <p>{transcription}</p>
+        </div>
       )}
     </div>
   )
@@ -232,9 +271,8 @@ export const ResultsPage: React.FC<{ sessionId: string }> = ({ sessionId }) => {
   useEffect(() => {
     const fetchResults = async () => {
       try {
-        const response = await fetch(
-          `${import.meta.env.VITE_API_URL}/api/interview/${sessionId}/results`
-        )
+        const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+        const response = await fetch(`${apiUrl}/api/interview/${sessionId}/results`)
         const data = await response.json()
         setResults(data)
       } catch (err) {
@@ -248,12 +286,72 @@ export const ResultsPage: React.FC<{ sessionId: string }> = ({ sessionId }) => {
   }, [sessionId])
 
   if (loading) {
-    return <div className="results-container"><p>Loading results...</p></div>
+    return (
+      <div className="results-container">
+        <div className="loading">
+          <div className="spinner" />
+          <p>Loading results...</p>
+        </div>
+      </div>
+    )
   }
 
   if (!results) {
-    return <div className="results-container"><p>No results found</p></div>
+    return (
+      <div className="results-container">
+        <p>No results found</p>
+      </div>
+    )
   }
 
-  return <Results data={results} />
+  return (
+    <div className="results-container">
+      <h1>Interview Results</h1>
+
+      <div className="score-card">
+        <div className="score-value">{Math.round(results.overall_score || 0)}</div>
+        <div className="score-label">Overall Score</div>
+        <div className="recommendation">
+          {results.recommendation || 'Good Performance'}
+        </div>
+      </div>
+
+      <div className="breakdown">
+        <h3>📊 Q&A Breakdown</h3>
+        {results.breakdown?.map((item: any, idx: number) => (
+          <div key={idx} className="breakdown-item">
+            <strong>Q{idx + 1}: {item.question}</strong>
+            <p>Score: {item.marks}</p>
+            <p>{item.feedback}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="strengths-weaknesses">
+        <div className="strength-card">
+          <h3>💪 Strengths</h3>
+          <ul>
+            {results.strengths?.map((s: string, idx: number) => (
+              <li key={idx}>{s}</li>
+            ))}
+          </ul>
+        </div>
+        <div className="weakness-card">
+          <h3>📈 Areas to Improve</h3>
+          <ul>
+            {results.weaknesses?.map((w: string, idx: number) => (
+              <li key={idx}>{w}</li>
+            ))}
+          </ul>
+        </div>
+      </div>
+
+      <button 
+        className="download-btn"
+        onClick={() => window.location.reload()}
+      >
+        🔄 Start Another Interview
+      </button>
+    </div>
+  )
 }
