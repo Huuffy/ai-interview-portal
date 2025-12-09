@@ -1,6 +1,7 @@
-*.txt
+secrets.txt
 .env
 .env.example
 *.env
 musetalk.png
 *.png
+COMPLETE-SETUP-GUIDE.md
