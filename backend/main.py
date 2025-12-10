@@ -1,13 +1,12 @@
 from fastapi import FastAPI, WebSocket, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 import asyncio
 import json
 from datetime import datetime
 import uuid
 import os
-
 from config import settings
 from models import db_init
 from schemas import InterviewSetupRequest, InterviewSetupResponse
@@ -97,7 +96,7 @@ async def setup_interview(request: InterviewSetupRequest):
     )
     
     # Return session info to frontend
-    ws_url = f"ws://{settings.API_HOST}/ws/interview/{session_id}"
+    ws_url = f"ws://{settings.API_HOST}:8000/ws/interview/{session_id}"
     
     return InterviewSetupResponse(
         session_id=session_id,
@@ -133,8 +132,47 @@ async def health_check():
         }
     }
 
-# ===== WEBSOCKET ENDPOINT =====
+# ===== VIDEO STREAMING ENDPOINT (FIX FOR MUSETALK) =====
+@app.get("/media/video/{session_id}/{video_name}")
+async def stream_video(session_id: str, video_name: str):
+    """
+    Stream video file with proper headers for HTML5 video tag.
+    Supports range requests for seeking.
+    """
+    video_path = os.path.join(settings.VIDEO_CACHE_DIR, session_id, video_name)
+    
+    # Security: Prevent path traversal
+    if ".." in video_name or not video_path.startswith(settings.VIDEO_CACHE_DIR):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    
+    if not os.path.exists(video_path):
+        print(f"[Video] File not found: {video_path}")
+        raise HTTPException(status_code=404, detail="Video not found")
+    
+    file_size = os.path.getsize(video_path)
+    
+    print(f"[Video] Streaming {video_name} ({file_size} bytes)")
+    
+    # Support range requests for seeking
+    async def file_streamer():
+        with open(video_path, "rb") as f:
+            while True:
+                chunk = f.read(1024 * 1024)  # 1MB chunks
+                if not chunk:
+                    break
+                yield chunk
+    
+    return StreamingResponse(
+        file_streamer(),
+        media_type="video/mp4",
+        headers={
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(file_size),
+            "Cache-Control": "public, max-age=3600",
+        }
+    )
 
+# ===== WEBSOCKET ENDPOINT =====
 @app.websocket("/ws/interview/{session_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str):
     """
@@ -242,7 +280,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     break
             
             # Get final transcription
-            final_transcript = await audio_service.get_final_transcription(session_id, audio_chunks)
+            final_transcript = await audio_service.get_final_transcription(
+                session_id, audio_chunks
+            )
             print(f"[WS] Final transcript: {final_transcript[:50]}...")
             
             # Store response
@@ -316,38 +356,36 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         except asyncio.TimeoutError:
             pass
         
-        # ===== COMPILE & SEND RESULTS =====
-        print(f"[WS] Compiling results for {session_id}")
-        results = results_service.compile_results(
-            session_id, session_service, evaluation_service
-        )
+        # Compile final results
+        results = results_service.compile_results(session_id)
         
         await websocket.send_json({
             "type": "results",
-            "overall_score": results.get("overall_score", 0),
-            "recommendation": results.get("recommendation", "CONSIDER"),
-            "breakdown": results.get("breakdown", []),
-            "strengths": results.get("strengths", []),
-            "weaknesses": results.get("weaknesses", [])
+            "evaluations": results.get("evaluations", []),
+            "overall_score": results.get("overall_score", 0)
         })
         
-        # Save interview to DB
-        interview_service.complete_interview(session_id, results)
+        # Store results
+        interview_service.finalize_interview(session_id, results)
         print(f"[WS] Interview completed: {session_id}")
         
     except Exception as e:
-        print(f"[WS] Error: {e}")
+        print(f"[WS] Error: {e}", exc_info=True)
         try:
             await websocket.send_json({"type": "error", "message": str(e)})
         except:
             pass
+    
     finally:
-        try:
-            await websocket.close()
-            print(f"[WS] WebSocket closed: {session_id}")
-        except:
-            pass
+        await websocket.close()
+        timer_service.stop_timer(session_id)
+        print(f"[WS] WebSocket closed: {session_id}")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host=settings.API_HOST, port=int(settings.API_PORT))
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        reload=True
+    )

@@ -29,6 +29,9 @@ class Settings:
     # Piper TTS Configuration
     PIPER_VOICE = os.getenv("PIPER_VOICE", "en_US-lessac-medium")
     PIPER_SPEED = float(os.getenv("PIPER_SPEED", "1.0"))
+    # Windows: Full path to piper executable (e.g., C:\Program Files\piper\piper.exe)
+    # Linux/Mac: Just "piper" if installed globally
+    PIPER_BIN = os.getenv("PIPER_BIN", "piper")
     
     # OpenAI Whisper Configuration
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
