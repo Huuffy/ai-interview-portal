@@ -9,5 +9,6 @@ __pycache__/
 *.pyc
 backend/data
 backend/media/images
+backend/media/audio
 backend/media/videos
 frontend/node_modules/
