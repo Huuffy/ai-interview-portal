@@ -14,3 +14,4 @@ backend/media/videos
 frontend/node_modules/
 .git
 .gitignore
+backend/MuseTalk

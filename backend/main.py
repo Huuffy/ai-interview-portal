@@ -147,7 +147,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         # ===== SEND GREETING VIDEO =====
         await websocket.send_json({
             "type": "greeting_video",
-            "video_url": f"/media/videos/{session_id}/greeting.mp4",
+            "video_url": f"/media/videos/greeting.mp4",
             "duration_seconds": 15
         })
         
@@ -169,7 +169,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             
             await websocket.send_json({
                 "type": "question_video",
-                "video_url": f"/media/videos/{session_id}/q{question_index}.mp4",
+                "video_url": f"/media/videos/q{question_index}.mp4",
                 "question_text": question_obj.get("text", ""),
                 "question_index": question_index
             })
@@ -272,7 +272,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         # ===== CLOSING SEQUENCE =====
         await websocket.send_json({
             "type": "closing_video",
-            "video_url": f"/media/videos/{session_id}/closing.mp4"
+            "video_url": f"/media/videos/closing.mp4"
         })
         
         # Wait for closing completion

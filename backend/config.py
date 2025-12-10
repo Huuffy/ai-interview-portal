@@ -54,10 +54,9 @@ class Settings:
     
     # ===== CORS =====
     ALLOWED_ORIGINS = [
-        "http://localhost:3000",
         "http://localhost:5173",
-        os.getenv("FRONTEND_URL", "http://localhost:3000"),
-        "https://*.vercel.app"
+        os.getenv("FRONTEND_URL", "http://localhost:5173"),
+        "*.vercel.app"
     ]
     
     # ===== External APIs =====

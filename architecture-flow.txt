@@ -1,0 +1,32 @@
+┌─────────────────────────────────────────────────────┐
+│            FRONTEND (React/TypeScript)                                                                            │
+│  SetupPage → InterviewPage → ResultsPage + CSS                                               │
+└─────────────────────────────────────────────────────┘
+                          ↕
+┌─────────────────────────────────────────────────────┐
+│    COMMUNICATION (WebSocket + REST APIs)                                                          │
+│  ws://localhost:8000/ws/interview/{sessionId}                                                      │
+│  POST /api/interview/setup                                                                                             │
+│  GET  /api/interview/{id}/results                                                                                   │
+│  GET  /api/interview/{id}/download-report                                                             │
+└─────────────────────────────────────────────────────┘
+                          ↕
+┌─────────────────────────────────────────────────────┐
+│         BACKEND (FastAPI + 8 Services)                                                                            │
+│  1. InterviewService     - Session lifecycle                                                                    │
+│  2. AudioService         - Whisper STT                                                                              │
+│  3. EvaluationService    - HuggingFace evaluation                                                │
+│  4. QuestionService      - Adaptive Q generation                                                     │
+│  5. MediaService         - TTS + MuseTalk video                                                           │
+│  6. SessionService       - In-memory state                                                                   │
+│  7. TimerService         - Interview timing                                                                       │
+│  8. ResultsService       - Results compilation                                                               │
+└─────────────────────────────────────────────────────┘
+                          ↕
+┌─────────────────────────────────────────────────────┐
+│  INTEGRATIONS (External APIs)                                                                                        │
+│  • WhisperAPI      (OpenAI speech-to-text)                                                                │
+│  • HuggingFaceAPI  (LLM evaluation)                                                                          │
+│  • PiperTTS        (text-to-speech)                                                                                    │
+│  • MuseTalkAPI     (avatar video generation)                                                            │
+└─────────────────────────────────────────────────────┘
