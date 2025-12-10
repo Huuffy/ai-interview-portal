@@ -1,6 +1,3 @@
-# backend/main.py
-# FastAPI Application - All Routes + WebSocket Handler
-
 from fastapi import FastAPI, WebSocket, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -12,7 +9,7 @@ import uuid
 import os
 
 from config import settings
-from models import db_init, Interview, InterviewQuestion, CandidateResponse, QuestionEvaluation
+from models import db_init
 from schemas import InterviewSetupRequest, InterviewSetupResponse
 from services import (
     InterviewService, AudioService, EvaluationService,
@@ -48,45 +45,64 @@ async def startup():
     db_init()
     print("✓ Database initialized")
     print("✓ Services ready")
+    
     # Create media directories
     os.makedirs(settings.MEDIA_DIR, exist_ok=True)
     os.makedirs(settings.VIDEO_CACHE_DIR, exist_ok=True)
     os.makedirs(settings.AUDIO_CACHE_DIR, exist_ok=True)
+    os.makedirs(settings.AVATAR_DIR, exist_ok=True)
+    print("✓ Media directories created")
+    
+    # Mount static files for serving media
+    if os.path.exists(settings.MEDIA_DIR):
+        app.mount("/media", StaticFiles(directory=settings.MEDIA_DIR), name="media")
+        print("✓ Static files mounted")
 
 # ===== REST ENDPOINTS =====
 
 @app.post("/api/interview/setup", response_model=InterviewSetupResponse)
 async def setup_interview(request: InterviewSetupRequest):
     """
-    1. Create session in DB
-    2. Pre-generate greeting + first 2-3 questions
+    1. Create interview record + in-memory session
+    2. Pre-generate greeting + first 3 questions
     3. Return session_id + WebSocket URL
     """
     session_id = str(uuid.uuid4())
     
-    session = interview_service.create_interview(
+    # Persist interview metadata
+    interview_service.create_interview(
         session_id=session_id,
         job_description=request.job_description,
         candidate_name=request.candidate_name,
-        duration_minutes=request.duration_minutes
+        duration_minutes=request.duration_minutes,
     )
     
-    # Pre-generate greeting (async)
+    # CRITICAL: Create in-memory session used by WebSocket
+    session_service.create_session(
+        session_id=session_id,
+        job_description=request.job_description,
+        candidate_name=request.candidate_name,
+    )
+    
+    # Pre-generate greeting (async background task)
     asyncio.create_task(
         media_service.pre_generate_greeting(session_id)
     )
     
-    # Pre-generate first 3 questions (async)
+    # Pre-generate first 3 questions (async background task)
     asyncio.create_task(
         question_service.pre_generate_opening_questions(
             session_id, request.job_description, 3
         )
     )
     
+    # Return session info to frontend
+    ws_url = f"ws://{settings.API_HOST}/ws/interview/{session_id}"
+    
     return InterviewSetupResponse(
         session_id=session_id,
-        ws_url=f"ws://{settings.API_HOST}/ws/interview/{session_id}",
-        message="Interview setup complete. Generating media..."
+        ws_url=ws_url,
+        message="Interview setup complete. Generating media...",
     )
 
 @app.get("/api/interview/{interview_id}/results")
@@ -126,10 +142,12 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     Manages: greeting → questions → responses → evaluation → results
     """
     await websocket.accept()
+    print(f"[WS] Client connected: {session_id}")
     
-    # Get session from DB
+    # Get session from SessionService (in-memory)
     session = session_service.get_session(session_id)
     if not session:
+        print(f"[WS] Session not found: {session_id}")
         await websocket.send_json({"type": "error", "message": "Session not found"})
         await websocket.close()
         return
@@ -139,58 +157,71 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     
     try:
         # Wait for client ready signal
+        print(f"[WS] Waiting for ready signal from {session_id}")
         data = await websocket.receive_json()
         if data.get("type") != "ready":
+            print(f"[WS] Invalid message type: {data.get('type')}")
             await websocket.send_json({"type": "error", "message": "Expected ready signal"})
             return
+        
+        print(f"[WS] Client ready, sending greeting video")
         
         # ===== SEND GREETING VIDEO =====
         await websocket.send_json({
             "type": "greeting_video",
-            "video_url": f"/media/videos/greeting.mp4",
+            "video_url": f"/media/video/{session_id}/greeting.mp4",
             "duration_seconds": 15
         })
         
-        # Wait for greeting completion
-        data = await websocket.receive_json()
-        if data.get("type") != "greeting_complete":
-            return
+        # Wait for greeting completion or skip
+        try:
+            data = await asyncio.wait_for(websocket.receive_json(), timeout=20.0)
+            if data.get("type") != "greeting_complete":
+                print(f"[WS] Skipping greeting wait: {data.get('type')}")
+        except asyncio.TimeoutError:
+            print(f"[WS] Greeting timeout, proceeding")
         
         # ===== INTERVIEW LOOP (4-5 questions) =====
         question_index = 1
-        
         while timer_service.get_remaining(session_id) > settings.CLOSING_BUFFER_SECONDS:
             
             # ===== SEND QUESTION VIDEO =====
             question_obj = session_service.get_question(session_id, question_index)
-            
             if not question_obj:
+                print(f"[WS] No question at index {question_index}")
                 break
             
+            print(f"[WS] Sending question {question_index}")
             await websocket.send_json({
                 "type": "question_video",
-                "video_url": f"/media/videos/q{question_index}.mp4",
+                "video_url": f"/media/video/{session_id}/q{question_index}.mp4",
                 "question_text": question_obj.get("text", ""),
-                "question_index": question_index
+                "question_index": question_index,
+                "total_questions": 5
             })
             
-            # Wait for listening start
-            data = await websocket.receive_json()
-            if data.get("type") != "listening_start":
-                continue
+            # Wait for listening start signal
+            try:
+                data = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
+                if data.get("type") != "listening_start":
+                    print(f"[WS] Unexpected message: {data.get('type')}")
+                    continue
+            except asyncio.TimeoutError:
+                print(f"[WS] No listening start signal, continuing")
             
             # ===== RECEIVE & PROCESS AUDIO =====
             audio_chunks = []
             transcription = ""
+            print(f"[WS] Listening for audio from {session_id}")
             
             while True:
-                # Receive audio chunk
                 try:
                     message = await asyncio.wait_for(
                         websocket.receive_json(),
                         timeout=60.0
                     )
                 except asyncio.TimeoutError:
+                    print(f"[WS] Audio timeout")
                     break
                 
                 if message.get("type") == "audio_chunk":
@@ -207,10 +238,12 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                         })
                 
                 elif message.get("type") == "audio_end":
+                    print(f"[WS] Audio ended, processing final transcript")
                     break
             
             # Get final transcription
             final_transcript = await audio_service.get_final_transcription(session_id, audio_chunks)
+            print(f"[WS] Final transcript: {final_transcript[:50]}...")
             
             # Store response
             session_service.add_response(
@@ -228,8 +261,17 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             # Store evaluation
             session_service.add_evaluation(session_id, question_index, evaluation)
             
+            # Send evaluation feedback
+            await websocket.send_json({
+                "type": "evaluation",
+                "score": evaluation.get("score", 5),
+                "marks": evaluation.get("marks", "5/10"),
+                "feedback": evaluation.get("feedback", "Good answer.")
+            })
+            
             # Check if we should continue or close
             if timer_service.get_remaining(session_id) <= settings.CLOSING_BUFFER_SECONDS:
+                print(f"[WS] Time expired, closing interview")
                 break
             
             # Generate next question (async)
@@ -247,14 +289,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             except asyncio.TimeoutError:
                 next_q_text = "Tell me more about this experience."
             
-            # Send evaluation feedback
-            await websocket.send_json({
-                "type": "evaluation",
-                "score": evaluation.get("score", 5),
-                "marks": evaluation.get("marks", "5/10"),
-                "feedback": evaluation.get("feedback", "Good answer.")
-            })
-            
             # Generate TTS and video (async - happens in background)
             asyncio.create_task(
                 media_service.generate_question_media(
@@ -270,9 +304,10 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             question_index += 1
         
         # ===== CLOSING SEQUENCE =====
+        print(f"[WS] Sending closing video")
         await websocket.send_json({
             "type": "closing_video",
-            "video_url": f"/media/videos/closing.mp4"
+            "video_url": f"/media/video/{session_id}/closing.mp4"
         })
         
         # Wait for closing completion
@@ -282,6 +317,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             pass
         
         # ===== COMPILE & SEND RESULTS =====
+        print(f"[WS] Compiling results for {session_id}")
         results = results_service.compile_results(
             session_id, session_service, evaluation_service
         )
@@ -297,9 +333,10 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         
         # Save interview to DB
         interview_service.complete_interview(session_id, results)
+        print(f"[WS] Interview completed: {session_id}")
         
     except Exception as e:
-        print(f"WebSocket error: {e}")
+        print(f"[WS] Error: {e}")
         try:
             await websocket.send_json({"type": "error", "message": str(e)})
         except:
@@ -307,12 +344,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     finally:
         try:
             await websocket.close()
+            print(f"[WS] WebSocket closed: {session_id}")
         except:
             pass
-
-# ===== STATIC FILES =====
-if os.path.exists("media"):
-    app.mount("/media", StaticFiles(directory="media"), name="media")
 
 if __name__ == "__main__":
     import uvicorn
