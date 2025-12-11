@@ -162,11 +162,26 @@ class EvaluationService:
             depth = "deep"
         return {"level": depth, "word_count": words}
 
-# ===== 4. QUESTION SERVICE =====
+# ===== 4. QUESTION SERVICE (FIXED) =====
 
 class QuestionService:
     def __init__(self):
         self.hf = HuggingFaceAPI()
+
+    async def get_question_by_index(self, session_id, index, session_service):
+        """
+        Retrieves a question text by index.
+        IMPORTANT: This requires session_service to be passed to access the DB.
+        """
+        try:
+            question_data = session_service.get_question(session_id, index)
+            if question_data:
+                return question_data.get("text")
+            logger.warning(f"[Question] Question {index} not found for session {session_id}")
+            return None
+        except Exception as e:
+            logger.error(f"[Question] Error retrieving question {index}: {e}")
+            return None
 
     async def generate_opening_question(self, job_description):
         """Generate opening question"""
@@ -236,7 +251,9 @@ class MediaService:
             os.makedirs(os.path.dirname(audio_path), exist_ok=True)
             
             logger.info(f"[Media] TTS: {filename}")
-            result = await self.piper.synthesize(text, audio_path)
+            # Ensure text is clean
+            clean_text = text.strip().replace('"', '').replace("'", "")
+            result = await self.piper.synthesize(clean_text, audio_path)
             
             if result:
                 logger.info(f"✓ [Media] TTS completed: {filename}")
@@ -269,7 +286,7 @@ class MediaService:
             logger.info(f"  Audio: {audio_path}")
             logger.info(f"  Output: {video_path}")
             
-            # Generate with MuseTalk (no fixed duration - MuseTalk decides based on audio)
+            # Generate with MuseTalk
             result = await self.musetalk.generate(
                 avatar_image=avatar_path,
                 audio_path=audio_path,
@@ -305,7 +322,7 @@ class MediaService:
             logger.info(f"[Media] Generating listening video: {video_filename}")
             logger.info(f"  Duration: {audio_duration_seconds}s")
             
-            # Generate listening video (nodding head with silent audio)
+            # Generate listening video
             result = await self.musetalk.generate_listening_video(
                 avatar_image=avatar_path,
                 audio_duration_seconds=audio_duration_seconds,
@@ -336,8 +353,11 @@ class MediaService:
             if audio_path:
                 # Generate video
                 video_path = await self.generate_video(session_id, audio_path, "greeting")
-                logger.info(f"[Media] Greeting ready: {video_path}")
-                return video_path
+                if video_path:
+                    logger.info(f"[Media] Greeting ready: {video_path}")
+                    return video_path
+                else:
+                    logger.error(f"✗ [Media] Greeting video failed")
             else:
                 logger.error(f"✗ [Media] Greeting audio generation failed")
                 return None

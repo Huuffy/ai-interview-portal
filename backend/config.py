@@ -48,4 +48,7 @@ class Settings:
     HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY", "")
     HUGGINGFACE_MODEL = os.getenv("HUGGINGFACE_MODEL", "mistral-7b-instruct")
 
+    #Mount frontend
+    FRONTEND_DIR = os.path.join(BASE_DIR, "frontend", "dist")
+
 settings = Settings()
