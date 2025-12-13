@@ -1,4 +1,5 @@
 import os
+import sys
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -10,7 +11,7 @@ class Settings:
     ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
     
     # Interview Configuration
-    INTERVIEW_DURATION_MINUTES = int(os.getenv("INTERVIEW_DURATION_MINUTES", "5"))
+    DEFAULT_QUESTION_COUNT = int(os.getenv("DEFAULT_QUESTION_COUNT", "5"))
     CLOSING_BUFFER_SECONDS = int(os.getenv("CLOSING_BUFFER_SECONDS", "30"))
     
     # Media Paths
@@ -30,7 +31,11 @@ class Settings:
     MUSETALK_ROOT = os.getenv("MUSETALK_ROOT", os.path.join(BASE_DIR, "MuseTalk"))
     MUSETALK_GPU = int(os.getenv("MUSETALK_GPU", "0"))
     MUSETALK_FP16 = os.getenv("MUSETALK_FP16", "true").lower() == "true"
-    MUSETALK_PYTHON_BIN = os.getenv("MUSETALK_PYTHON_BIN", "python")
+    MUSETALK_PYTHON_BIN = os.getenv("MUSETALK_PYTHON_BIN", sys.executable)
+
+    MUSEV_ROOT = os.getenv("MUSEV_ROOT", os.path.join(BASE_DIR, "MuseV"))
+    # Base video filename to store/reuse
+    BASE_VIDEO_NAME = "base_listening_loop.mp4"
     
     # Piper TTS Configuration
     PIPER_VOICE = os.getenv("PIPER_VOICE","en_US-bryce-medium")
@@ -47,7 +52,7 @@ class Settings:
     # HuggingFace Configuration
     HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY", "")
     HUGGINGFACE_MODEL = os.getenv("HUGGINGFACE_MODEL", "mistral-7b-instruct")
-
+    
     #Mount frontend
     FRONTEND_DIR = os.path.join(BASE_DIR, "frontend", "dist")
 

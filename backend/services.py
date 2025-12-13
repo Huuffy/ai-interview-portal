@@ -7,7 +7,8 @@ from typing import Dict, List, Optional
 import uuid
 import os
 from config import settings
-from integrations import WhisperAPI, HuggingFaceAPI, PiperTTS, MuseTalkAPI
+import random
+from integrations import WhisperAPI, HuggingFaceAPI, PiperTTS, MuseTalkAPI, MuseVAPI
 from utils import logger, calculate_score, decide_next_question_type
 
 # ===== 1. INTERVIEW SERVICE =====
@@ -16,13 +17,13 @@ class InterviewService:
     def __init__(self):
         self.interviews = {}
 
-    def create_interview(self, session_id, job_description, candidate_name, duration_minutes):
+    def create_interview(self, session_id, job_description, candidate_name, question_count):
         """Create interview in DB"""
         self.interviews[session_id] = {
             "session_id": session_id,
             "job_description": job_description,
             "candidate_name": candidate_name,
-            "interview_duration_minutes": duration_minutes,
+            "question_count": question_count,
             "status": "setup",
             "start_time": datetime.now(),
             "end_time": None,
@@ -200,26 +201,69 @@ Return ONLY the question, nothing else.
     async def generate_adaptive_question(self, previous_question, response, evaluation, job_description, conversation_history):
         """Generate next question based on evaluation"""
         try:
-            next_type = evaluation.get("next_question_type", "follow_up")
+            suggested_type = evaluation.get("next_question_type", "follow_up")
+            score = evaluation.get("score", 5)
             
-            if next_type == "new_topic":
-                prompt = f"""Job: {job_description}
-Previous Q: {previous_question}
-User response: {response}
-Generate a different technical question on a new topic relevant to this job.
-Return ONLY the question."""
-            elif next_type == "follow_up_deeper":
-                prompt = f"""Previous Q: {previous_question}
-User response: {response}
-Generate a follow-up question that digs deeper into specifics, technical details, or challenges.
-Return ONLY the question."""
+            # [LOGIC FIX] Enforce "Max 1 Follow-up" rule
+            # If the candidate answered well (score >= 6), force a new topic to cover more ground.
+            # Only follow up if they struggled, but even then, don't get stuck.
+            if score >= 6:
+                next_type = "new_topic"
             else:
-                prompt = f"Generate a follow-up question to: {previous_question}"
+                next_type = suggested_type
+
+            # If we are late in the interview (e.g., Q3, Q4), bias heavily toward new topics
+            # to ensure we check different technical skills from the Job Description.
+            if len(conversation_history.get('questions', [])) >= 2: 
+                 if random.random() > 0.3: # 70% chance to switch topic regardless of score
+                     next_type = "new_topic"
+
+            # [PROMPT IMPROVEMENT] Force Technicality
+            if next_type == "new_topic":
+                prompt = f"""
+                Job Role: {job_description}
+                Context: We are moving to a NEW technical topic.
+                Previous Topic: {previous_question}
+                
+                Task: Ask a HARD, TECHNICAL interview question about a specific tool, framework, language feature, or concept mentioned in the Job Description.
+                Constraints:
+                - Do NOT ask about the previous topic ({previous_question}).
+                - Do NOT ask generic behavioral questions (e.g., "Tell me about a time").
+                - Ask "How does X work?" or "Compare X and Y" or "Explain the lifecycle of Z".
+                - Return ONLY the question text.
+                """
+            elif next_type == "follow_up_deeper":
+                prompt = f"""
+                Job Role: {job_description}
+                Candidate's Answer: "{response}"
+                Issue: The answer was shallow.
+                
+                Task: Ask a technical follow-up that forces them to explain the 'Internal Working' or 'Implementation Details'.
+                Example: "How exactly does that handle memory management?" or "What happens if the service fails?"
+                - Return ONLY the question text.
+                """
+            else:
+                prompt = f"""
+                Job Role: {job_description}
+                Candidate's Answer: "{response}"
+                
+                Task: Ask a short follow-up question to test their specific knowledge on this point.
+                - Return ONLY the question text.
+                """
             
             question = await self.hf.generate(prompt)
             return question.strip()
-        except:
-            return "Can you elaborate on that experience?"
+
+        except Exception as e:
+            logger.error(f"[Question] Generation error: {e}")
+            # [FALLBACK FIX] Randomized technical fallbacks
+            fallbacks = [
+                "Could you describe the most complex technical challenge you faced in your last project?",
+                "What specific tools or libraries did you prefer for that implementation, and why?",
+                "How did you handle error handling and edge cases in that scenario?",
+                "Can you walk me through the system architecture you designed for that?"
+            ]
+            return random.choice(fallbacks)
 
     async def pre_generate_opening_questions(self, session_id, job_description, count):
         """Pre-generate opening questions"""
@@ -242,102 +286,98 @@ class MediaService:
     def __init__(self):
         self.piper = PiperTTS()
         self.musetalk = MuseTalkAPI()
+        self.musev = MuseVAPI() # [NEW] Initialize MuseV
         self.video_cache = {}
+        
+        # Path to the shared 30s listening loop
+        self.base_video_path = os.path.join(settings.AVATAR_DIR, settings.BASE_VIDEO_NAME)
 
-    async def text_to_speech(self, text, session_id, filename):
-        """Convert text to speech using Piper"""
-        try:
-            audio_path = os.path.join(settings.AUDIO_CACHE_DIR, session_id, f"{filename}.wav")
-            os.makedirs(os.path.dirname(audio_path), exist_ok=True)
-            
-            logger.info(f"[Media] TTS: {filename}")
-            # Ensure text is clean
-            clean_text = text.strip().replace('"', '').replace("'", "")
-            result = await self.piper.synthesize(clean_text, audio_path)
-            
-            if result:
-                logger.info(f"✓ [Media] TTS completed: {filename}")
-            else:
-                logger.error(f"✗ [Media] TTS failed: {filename}")
-            
-            return result
-        except Exception as e:
-            logger.error(f"[Media] TTS error: {e}")
+    async def ensure_base_video(self):
+        """
+        Step 1: Check if 30s MuseV video exists. If not, generate it from default_avatar.png.
+        """
+        if os.path.exists(self.base_video_path):
+            return self.base_video_path
+        
+        logger.info("[Media] Base listening video missing. Generating with MuseV...")
+        avatar_image = os.path.join(settings.AVATAR_DIR, "default_avatar.png")
+        
+        if not os.path.exists(avatar_image):
+            logger.error(f"❌ Avatar image not found: {avatar_image}")
             return None
+
+        # Generate the 30s video
+        result = await self.musev.generate_base_video(
+            image_path=avatar_image,
+            output_path=self.base_video_path
+        )
+        
+        if not result:
+            logger.error("❌ Failed to generate base video. Falling back to static image.")
+            # Fallback: Just return the image path, MuseTalk will handle it (static lipsync)
+            return avatar_image 
+            
+        return result
 
     async def generate_video(self, session_id, audio_path, video_filename):
-        """Generate lip-synced video using MuseTalk"""
+        """
+        Step 2: Generate Lip-Synced video using the Base Video + Audio.
+        """
         try:
-            avatar_path = os.path.join(settings.AVATAR_DIR, "default_avatar.png")
-            
-            # Check if avatar exists
-            if not os.path.exists(avatar_path):
-                logger.error(f"✗ [Media] Avatar not found: {avatar_path}")
-                logger.error(f"  Please add default_avatar.png to {settings.AVATAR_DIR}/")
+            # 1. Ensure we have the base video (Input Source)
+            input_source = await self.ensure_base_video()
+            if not input_source:
                 return None
             
             output_dir = os.path.join(settings.VIDEO_CACHE_DIR, session_id)
             os.makedirs(output_dir, exist_ok=True)
-            
             video_path = os.path.join(output_dir, f"{video_filename}.mp4")
             
-            logger.info(f"[Media] Generating video: {video_filename}")
-            logger.info(f"  Avatar: {avatar_path}")
-            logger.info(f"  Audio: {audio_path}")
-            logger.info(f"  Output: {video_path}")
+            logger.info(f"[Media] Generating {video_filename} using base: {os.path.basename(input_source)}")
             
-            # Generate with MuseTalk
+            # 2. Call MuseTalk with Video Input
             result = await self.musetalk.generate(
-                avatar_image=avatar_path,
+                input_source=input_source, # <--- Passing MP4 or PNG here
                 audio_path=audio_path,
-                output_path=video_path,
-                video_type="standard"
-            )
-            
-            if result:
-                self.video_cache[f"{session_id}_{video_filename}"] = video_path
-                logger.info(f"✓ [Media] Video generated: {video_filename}")
-            else:
-                logger.error(f"✗ [Media] Video generation failed: {video_filename}")
-            
-            return result
-        except Exception as e:
-            logger.error(f"[Media] Video generation error: {e}", exc_info=True)
-            return None
-
-    async def generate_listening_video(self, session_id, audio_duration_seconds, video_filename):
-        """Generate listening video (nodding head)"""
-        try:
-            avatar_path = os.path.join(settings.AVATAR_DIR, "default_avatar.png")
-            
-            if not os.path.exists(avatar_path):
-                logger.error(f"✗ [Media] Avatar not found for listening video")
-                return None
-            
-            output_dir = os.path.join(settings.VIDEO_CACHE_DIR, session_id)
-            os.makedirs(output_dir, exist_ok=True)
-            
-            video_path = os.path.join(output_dir, f"{video_filename}.mp4")
-            
-            logger.info(f"[Media] Generating listening video: {video_filename}")
-            logger.info(f"  Duration: {audio_duration_seconds}s")
-            
-            # Generate listening video
-            result = await self.musetalk.generate_listening_video(
-                avatar_image=avatar_path,
-                audio_duration_seconds=audio_duration_seconds,
                 output_path=video_path
             )
             
             if result:
                 self.video_cache[f"{session_id}_{video_filename}"] = video_path
-                logger.info(f"✓ [Media] Listening video generated: {video_filename}")
-            else:
-                logger.error(f"✗ [Media] Listening video failed: {video_filename}")
-            
-            return result
+                return result
+            return None
         except Exception as e:
-            logger.error(f"[Media] Listening video error: {e}", exc_info=True)
+            logger.error(f"[Media] Error: {e}", exc_info=True)
+            return None
+
+    async def generate_listening_video(self, session_id, audio_duration_seconds, video_filename):
+        """
+        Step 3: Return the Listening Video.
+        Since we now have a high-quality MuseV loop, we just copy/link it.
+        We ignore 'audio_duration_seconds' because we just loop the 30s video in UI.
+        """
+        try:
+            base_video = await self.ensure_base_video()
+            if not base_video: return None
+            
+            # If base is just an image (fallback), we can't use it as a video loop
+            if base_video.endswith(".png"):
+                # Use old method: create generic listening video
+                return await self.musetalk.generate_listening_video(
+                    avatar_image=base_video,
+                    audio_duration_seconds=3.0,
+                    output_path=os.path.join(settings.VIDEO_CACHE_DIR, session_id, f"{video_filename}.mp4")
+                )
+
+            # If base is video, just copy/symlink it to the session folder
+            output_path = os.path.join(settings.VIDEO_CACHE_DIR, session_id, f"{video_filename}.mp4")
+            if not os.path.exists(output_path):
+                import shutil
+                shutil.copy(base_video, output_path)
+            
+            return output_path
+        except Exception as e:
+            logger.error(f"[Media] Listening setup error: {e}")
             return None
 
     async def pre_generate_greeting(self, session_id):
@@ -419,12 +459,13 @@ class SessionService:
     def __init__(self):
         self.sessions = {}
 
-    def create_session(self, session_id, job_description, candidate_name):
+    def create_session(self, session_id, job_description, candidate_name, question_count):
         """Create new session"""
         self.sessions[session_id] = {
             "session_id": session_id,
             "job_description": job_description,
             "candidate_name": candidate_name,
+            "question_count": question_count,
             "questions": [],
             "responses": [],
             "evaluations": [],

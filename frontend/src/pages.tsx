@@ -6,7 +6,8 @@ export const SetupPage: React.FC<{
 }> = ({ onStart }) => {
   const [jobDesc, setJobDesc] = useState('');
   const [name, setName] = useState('');
-  const [duration, setDuration] = useState(5);
+  // --- FIX 1: Rename state variable ---
+  const [questionCount, setQuestionCount] = useState(5); 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -27,183 +28,66 @@ export const SetupPage: React.FC<{
         body: JSON.stringify({
           job_description: jobDesc,
           candidate_name: name,
-          duration_minutes: duration,
+          // --- FIX 2: Send correct key and variable ---
+          question_count: questionCount, 
         }),
       });
 
       if (!response.ok) throw new Error('Failed to start interview');
 
       const data = await response.json();
-      console.log('[Setup] Response:', data);
       onStart(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong');
-      console.error('[Setup] Error:', err);
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div style={{
-      minHeight: '100vh',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      padding: '20px',
-      backgroundColor: 'var(--color-background)'
-    }}>
-      <div style={{
-        maxWidth: '600px',
-        width: '100%',
-        backgroundColor: 'var(--color-surface)',
-        borderRadius: '12px',
-        border: '1px solid var(--color-card-border)',
-        boxShadow: 'var(--shadow-sm)',
-        overflow: 'hidden'
-      }}>
-        {/* Header */}
-        <div style={{
-          padding: '24px',
-          borderBottom: '1px solid var(--color-card-border-inner)',
-          textAlign: 'center'
-        }}>
-          <h1 style={{
-            fontSize: '24px',
-            fontWeight: '600',
-            margin: '0 0 8px 0',
-            color: 'var(--color-text)'
-          }}>🎯 Interview Setup</h1>
-          <p style={{
-            fontSize: '14px',
-            color: 'var(--color-text-secondary)',
-            margin: 0
-          }}>Prepare for your interview with AI guidance</p>
-        </div>
+    <div style={{ /* ... container styles ... */ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'var(--color-background)' }}>
+      <div style={{ /* ... card styles ... */ maxWidth: '600px', width: '100%', backgroundColor: 'var(--color-surface)', padding: '24px', borderRadius: '12px' }}>
+        <h1 style={{ textAlign: 'center', color: 'var(--color-text)' }}>🎯 Interview Setup</h1>
+        
+        {error && <div style={{ color: 'red', marginBottom: '10px' }}>{error}</div>}
 
-        {/* Error Banner */}
-        {error && (
-          <div style={{
-            margin: '20px',
-            padding: '12px 16px',
-            backgroundColor: 'rgba(255, 84, 89, 0.15)',
-            color: 'var(--color-error)',
-            borderRadius: '8px',
-            border: '1px solid rgba(255, 84, 89, 0.25)',
-            fontSize: '14px'
-          }}>
-            ⚠️ {error}
-          </div>
-        )}
-
-        {/* Form */}
-        <form onSubmit={handleStart} style={{ padding: '24px' }}>
-          {/* Job Description */}
+        <form onSubmit={handleStart}>
           <div style={{ marginBottom: '20px' }}>
-            <label style={{
-              display: 'block',
-              marginBottom: '8px',
-              fontWeight: '550',
-              fontSize: '12px',
-              color: 'var(--color-text)'
-            }}>Job Description</label>
+            <label style={{ display: 'block', marginBottom: '8px', color: 'var(--color-text)' }}>Job Description</label>
             <textarea
               value={jobDesc}
               onChange={(e) => setJobDesc(e.target.value)}
-              placeholder="Describe the job role..."
-              rows={4}
-              style={{
-                width: '100%',
-                padding: '12px 16px',
-                border: '1px solid var(--color-border)',
-                borderRadius: '8px',
-                fontFamily: 'inherit',
-                fontSize: '14px',
-                color: 'var(--color-text)',
-                backgroundColor: 'var(--color-surface)',
-                resize: 'vertical'
-              }}
+              style={{ width: '100%', padding: '12px', borderRadius: '8px' }}
               required
             />
           </div>
 
-          {/* Name */}
           <div style={{ marginBottom: '20px' }}>
-            <label style={{
-              display: 'block',
-              marginBottom: '8px',
-              fontWeight: '550',
-              fontSize: '12px',
-              color: 'var(--color-text)'
-            }}>Your Name</label>
+            <label style={{ display: 'block', marginBottom: '8px', color: 'var(--color-text)' }}>Your Name</label>
             <input
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="Enter your full name"
-              style={{
-                width: '100%',
-                padding: '12px 16px',
-                border: '1px solid var(--color-border)',
-                borderRadius: '8px',
-                fontFamily: 'inherit',
-                fontSize: '14px',
-                color: 'var(--color-text)',
-                backgroundColor: 'var(--color-surface)',
-                boxSizing: 'border-box'
-              }}
+              style={{ width: '100%', padding: '12px', borderRadius: '8px' }}
               required
             />
           </div>
 
-          {/* Duration */}
+          {/* --- FIX 3: Updated Input Label and Value binding --- */}
           <div style={{ marginBottom: '20px' }}>
-            <label style={{
-              display: 'block',
-              marginBottom: '8px',
-              fontWeight: '550',
-              fontSize: '12px',
-              color: 'var(--color-text)'
-            }}>Interview Duration (minutes)</label>
+            <label style={{ display: 'block', marginBottom: '8px', color: 'var(--color-text)' }}>Number of Questions</label>
             <input
               type="number"
-              value={duration}
-              onChange={(e) => setDuration(parseInt(e.target.value))}
+              value={questionCount}
+              onChange={(e) => setQuestionCount(parseInt(e.target.value))}
               min="1"
-              max="30"
-              style={{
-                width: '100%',
-                padding: '12px 16px',
-                border: '1px solid var(--color-border)',
-                borderRadius: '8px',
-                fontFamily: 'inherit',
-                fontSize: '14px',
-                color: 'var(--color-text)',
-                backgroundColor: 'var(--color-surface)',
-                boxSizing: 'border-box'
-              }}
+              max="10"
+              style={{ width: '100%', padding: '12px', borderRadius: '8px' }}
             />
           </div>
 
-          {/* Submit Button */}
-          <button
-            type="submit"
-            disabled={loading}
-            style={{
-              width: '100%',
-              padding: '12px 24px',
-              backgroundColor: loading ? 'rgba(50, 184, 198, 0.5)' : 'var(--color-primary)',
-              color: 'var(--color-btn-primary-text)',
-              border: 'none',
-              borderRadius: '8px',
-              fontSize: '16px',
-              fontWeight: '500',
-              cursor: loading ? 'not-allowed' : 'pointer',
-              transition: 'all 150ms ease',
-              opacity: loading ? 0.6 : 1
-            }}
-          >
-            {loading ? '⏳ Starting...' : '▶️ Start Interview'}
+          <button type="submit" disabled={loading} style={{ width: '100%', padding: '12px', backgroundColor: 'var(--color-primary)', color: 'white', borderRadius: '8px', border: 'none' }}>
+            {loading ? 'Starting...' : 'Start Interview'}
           </button>
         </form>
       </div>
@@ -426,11 +310,12 @@ export const InterviewPage: React.FC<{
   const [questionText, setQuestionText] = useState('Waiting for question...');
   const [transcription, setTranscription] = useState('');
   const [isRecording, setIsRecording] = useState(false);
+  const [isInputAllowed, setIsInputAllowed] = useState(false);
   const [error, setError] = useState('');
   const [connectionStatus, setConnectionStatus] = useState('Connecting...');
   const [aiVideoUrl, setAiVideoUrl] = useState('');
   const [aiVideoError, setAiVideoError] = useState(false);
-  
+  const isConnecting = useRef(false);
   const socketRef = useRef<WebSocket | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -477,8 +362,14 @@ export const InterviewPage: React.FC<{
     };
   }, []);
 
-  // WebSocket connection
+  //WebSocket connection
   useEffect(() => {
+    // [NEW] CHECK: If already connecting, STOP immediately
+    if (isConnecting.current) {
+        console.log('[Interview] Skipping double connection attempt');
+        return;
+    }
+
     let fixedUrl = wsUrl.replace('0.0.0.0', 'localhost');
     if (!fixedUrl.includes(':8000')) {
       fixedUrl = fixedUrl.replace('ws://localhost/', 'ws://localhost:8000/');
@@ -486,6 +377,9 @@ export const InterviewPage: React.FC<{
     
     console.log('[Interview] Connecting to WebSocket:', fixedUrl);
     setConnectionStatus('Connecting...');
+    
+    // [NEW] LOCK: Set connecting to true
+    isConnecting.current = true;
 
     try {
       const socket = new WebSocket(fixedUrl);
@@ -504,27 +398,30 @@ export const InterviewPage: React.FC<{
           console.log('[Interview] Message:', message.type);
 
           if (message.type === 'greeting_video') {
-            const fullUrl = getFullVideoUrl(message.video_url);
-            console.log('[Interview] Setting greeting video:', fullUrl);
-            setAiVideoUrl(fullUrl);
-            setQuestionText('Welcome! Let\'s begin the interview.');
-          } else if (message.type === 'question_video') {
-            const fullUrl = getFullVideoUrl(message.video_url);
-            console.log('[Interview] Setting question video:', fullUrl);
-            setAiVideoUrl(fullUrl);
-            setCurrentQuestion(message.question_index || 1);
-            setQuestionText(message.question_text || `Question ${message.question_index}`);
-            setTranscription('');
-          } else if (message.type === 'transcription_partial') {
-            setTranscription(message.text || '');
-          } else if (message.type === 'results') {
-            console.log('[Interview] Results received');
-            if (onComplete) onComplete(message);
-          } else if (message.type === 'error') {
-            setError(message.message || 'Server error');
+            setAiVideoUrl(getFullVideoUrl(message.video_url));
+            setQuestionText('Welcome! Let\'s begin.');
+            } 
+          else if (message.type === 'question_video') {
+            setAiVideoUrl(getFullVideoUrl(message.video_url));
+            setCurrentQuestion(message.question_index);
+            setQuestionText(message.question_text);
+            setIsInputAllowed(false);
+            if (isRecording) stopRecording();
+          } 
+          else if (message.type === 'start_listening') {
+             console.log('[Interview] AI is listening...');
+             if (message.video_url) {
+                setAiVideoUrl(getFullVideoUrl(message.video_url));
+                if (aiVideoRef.current) aiVideoRef.current.loop = true;
+            }
+            setIsInputAllowed(true);
           }
+          else if (message.type === 'results') {
+             if (onComplete) onComplete(message);
+          }
+          
         } catch (e) {
-          console.error('[Interview] Message parse error:', e);
+          console.error('[Interview] Error:', e);
         }
       };
 
@@ -532,27 +429,34 @@ export const InterviewPage: React.FC<{
         console.error('[Interview] WebSocket error:', err);
         setError('WebSocket connection failed');
         setConnectionStatus('Error ❌');
+        isConnecting.current = false; // Reset lock on error
       };
 
       socket.onclose = () => {
         console.log('[Interview] WebSocket closed');
         socketRef.current = null;
         setConnectionStatus('Disconnected');
+        isConnecting.current = false; // Reset lock on close
       };
 
-      return () => {
-        if (socketRef.current?.readyState === WebSocket.OPEN) {
-          socketRef.current.close();
-        }
-      };
     } catch (e) {
       console.error('[Interview] Connection error:', e);
       setError('Failed to connect');
       setConnectionStatus('Error ❌');
+      isConnecting.current = false;
     }
+
+    // Cleanup
+    return () => {
+      if (socketRef.current?.readyState === WebSocket.OPEN) {
+        socketRef.current.close();
+      }
+      isConnecting.current = false;
+    };
   }, [wsUrl, onComplete]);
 
   const startRecording = async () => {
+    if (!isInputAllowed) return;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mediaRecorder = new MediaRecorder(stream);
@@ -560,18 +464,30 @@ export const InterviewPage: React.FC<{
       audioChunksRef.current = [];
 
       mediaRecorder.ondataavailable = (event) => {
-        audioChunksRef.current.push(event.data);
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
       };
 
       mediaRecorder.onstop = async () => {
+        // Create blob from collected chunks
         const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
+        
+        console.log(`[Interview] Sending audio: ${audioBlob.size} bytes`); // Debug log
+        
         if (socketRef.current?.readyState === WebSocket.OPEN) {
+          // Send the Blob directly
           socketRef.current.send(audioBlob);
+          // Send the 'audio_end' signal strictly AFTER the blob
+          setTimeout(() => {
+             socketRef.current?.send(JSON.stringify({ type: 'audio_end' }));
+          }, 100);
         }
         stream.getTracks().forEach(track => track.stop());
       };
 
-      mediaRecorder.start();
+      // Request data every 1 second to ensure chunks are captured
+      mediaRecorder.start(1000); 
       setIsRecording(true);
       console.log('[Interview] Recording started');
     } catch (e) {
@@ -581,13 +497,16 @@ export const InterviewPage: React.FC<{
   };
 
   const stopRecording = () => {
-    if (mediaRecorderRef.current) {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
       setIsRecording(false);
-      console.log('[Interview] Recording stopped');
+      setIsInputAllowed(false);
+      // Removed the manual 'audio_end' sending here because we moved it to onstop
+      // to ensure it happens after the data is sent.
+      
+      if (aiVideoRef.current) aiVideoRef.current.loop = false;
     }
   };
-
   return (
     <div style={{
       minHeight: '100vh',
@@ -777,19 +696,21 @@ export const InterviewPage: React.FC<{
             {!isRecording ? (
               <button
                 onClick={startRecording}
+                disabled={!isInputAllowed}
                 style={{
                   padding: '12px 24px',
-                  backgroundColor: 'var(--color-primary)',
+                  backgroundColor: isInputAllowed ? 'var(--color-primary)' : 'var(--color-gray-300)',
                   color: 'var(--color-btn-primary-text)',
                   border: 'none',
                   borderRadius: '8px',
                   fontSize: '14px',
                   fontWeight: '500',
-                  cursor: 'pointer',
-                  transition: 'all 150ms ease'
+                  cursor: isInputAllowed ? 'pointer' : 'not-allowed',
+                  transition: 'all 150ms ease',
+                  opacity: isInputAllowed ? 1 : 0.6
                 }}
               >
-                🎤 Start Recording
+                {isInputAllowed ? '🎤 Speak' : '✋ wait'}
               </button>
             ) : (
               <button
@@ -846,7 +767,7 @@ export const ResultsPage: React.FC<{
     );
   }
 
-  const totalScore = results.evaluations.reduce((sum: number, item: any) => sum + (item.marks || 0), 0);
+  const totalScore = results.evaluations.reduce((sum: number, item: any) => sum + (item.score || 0), 0);
   const avgScore = (totalScore / results.evaluations.length).toFixed(1);
 
   return (

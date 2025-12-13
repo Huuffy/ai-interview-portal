@@ -18,3 +18,4 @@ backend/MuseTalk
 frontend/dist
 backend/en_US-bryce-medium.onnx
 backend/en_US-bryce-medium.onnx.json
+MuseV/

@@ -8,7 +8,7 @@ from typing import List, Optional
 class InterviewSetupRequest(BaseModel):
     job_description: str
     candidate_name: str
-    duration_minutes: int = 5
+    question_count: int
     avatar_image_url: Optional[str] = None
 
 class InterviewSetupResponse(BaseModel):

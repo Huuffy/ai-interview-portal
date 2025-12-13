@@ -1,11 +1,15 @@
 import asyncio
 import subprocess
 import os
-from typing import Optional
+from typing import Optional, List, Union
 import logging
 from pathlib import Path
 import shutil
 from config import settings
+import tempfile 
+import yaml
+import re
+from huggingface_hub import InferenceClient
 
 # Setup logging
 logging.basicConfig(level=logging.DEBUG)
@@ -13,163 +17,221 @@ logger = logging.getLogger(__name__)
 
 # ===== MUSETALK API - ACTUAL VIDEO GENERATION =====
 
-class MuseTalkAPI:
-    """Wrapper around MuseTalk CLI for video generation with LIP SYNC."""
+class MuseVAPI:
+    """Wrapper for MuseV to generate the base listening video (idle animation)."""
     
+    def __init__(self):
+        self.root = settings.MUSEV_ROOT
+        self.python_bin = settings.MUSETALK_PYTHON_BIN # Usually shares env with MuseTalk
+        self.gpu = settings.MUSETALK_GPU
+        self.lock = asyncio.Lock()
+        
+        logger.info(f"✓ MuseV initialized: {self.root}")
+
+    async def generate_base_video(self, image_path: str, output_path: str) -> Optional[str]:
+        """
+        Generate a 30-second idle video from a static image.
+        """
+        async with self.lock:
+            if os.path.exists(output_path):
+                logger.info(f"[MuseV] Base video already exists: {output_path}")
+                return output_path
+
+            logger.info(f"[MuseV] Generating new base video (This takes time!)...")
+            
+            try:
+                # MuseV requires absolute paths
+                root_abs = os.path.abspath(self.root)
+                image_abs = os.path.abspath(image_path)
+                output_abs = os.path.abspath(output_path)
+                os.makedirs(os.path.dirname(output_abs), exist_ok=True)
+
+                # Construct MuseV Command
+                # NOTE: Adjust arguments based on your specific MuseV version/script
+                cmd = [
+                    self.python_bin,
+                    "-m", "scripts.inference", # Or "inference.py" depending on repo structure
+                    "--input_image", image_abs,
+                    "--output_path", output_abs,
+                    "--duration", "30", # Generate 30 seconds
+                    "--gpu", str(self.gpu)
+                ]
+
+                # Environment setup
+                env = os.environ.copy()
+                env["PYTHONPATH"] = root_abs + os.pathsep + env.get("PYTHONPATH", "")
+
+                logger.info(f"[MuseV] Running: {' '.join(cmd)}")
+                
+                # Run Inference
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    cmd,
+                    cwd=root_abs,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=1200 # Give it 20 mins, MuseV is heavy
+                )
+
+                if result.returncode != 0:
+                    logger.error(f"[MuseV] Failed: {result.stderr[-1000:]}")
+                    return None
+
+                # MuseV often outputs to a folder, so we might need to find the specific mp4
+                # Assuming output_abs is the exact file path for this example:
+                if os.path.exists(output_abs):
+                    logger.info(f"✓ [MuseV] Generated base video: {output_path}")
+                    return output_path
+                else:
+                    logger.error(f"[MuseV] Output file not found after success code.")
+                    return None
+
+            except Exception as e:
+                logger.error(f"[MuseV] Error: {e}", exc_info=True)
+                return None
+
+
+# [UPDATED] ===== MUSETALK API =====
+
+class MuseTalkAPI:
+    # ... __init__ remains same ...
     def __init__(self):
         self.musetalk_root = settings.MUSETALK_ROOT
         self.gpu = settings.MUSETALK_GPU
         self.fp16 = settings.MUSETALK_FP16
         self.python_bin = settings.MUSETALK_PYTHON_BIN
         self.inference_script = self._find_inference_script()
+        self.lock = asyncio.Lock()
         
-        logger.info(f"✓ MuseTalk initialized:")
-        logger.info(f"  Root: {self.musetalk_root}")
-        logger.info(f"  Inference: {self.inference_script}")
-        logger.info(f"  GPU: {self.gpu}")
-        logger.info(f"  FP16: {self.fp16}")
-        logger.info(f"  Python: {self.python_bin}")
-    
+        logger.info(f"✓ MuseTalk initialized")
+
+    # ... _find_inference_script and _get_ffmpeg_path remain same ...
     def _find_inference_script(self) -> Optional[str]:
-        """Find the correct path to inference.py - Check multiple locations"""
-        
-        # 1. Define the search paths as a LIST
         search_locations = [
             os.path.join(self.musetalk_root, "scripts", "inference.py"),
-            os.path.join(self.musetalk_root, "inference.py"),                      # Root
-            os.path.join(self.musetalk_root, "MuseTalk", "inference.py"),          # Subfolder
-            os.path.abspath("inference.py")                                        # Current working dir
+            os.path.join(self.musetalk_root, "inference.py"),
+            os.path.abspath("inference.py")
         ]
-        
-        logger.info(f"[MuseTalk] Searching for inference.py in {len(search_locations)} locations...")
-        
-        # 2. Iterate through the LIST
-        for i, path in enumerate(search_locations, 1):
-            if os.path.exists(path):
-                logger.info(f"✓ Found inference.py at ({i}/{len(search_locations)}): {path}")
-                return os.path.abspath(path) # Return the actual file path string
+        for path in search_locations:
+            if os.path.exists(path): return os.path.abspath(path)
+        return None
 
-        # 3. If not found, log an error and return None
-        logger.error("[MuseTalk] ✗ Could not find inference.py in any expected location.")
-        return None
-        
-        if os.path.exists(self.musetalk_root):
-            files = os.listdir(self.musetalk_root)
-            logger.error(f"  Files found in {self.musetalk_root}:")
-            for f in files[:20]:  # List first 20
-                path_type = "DIR" if os.path.isdir(os.path.join(self.musetalk_root, f)) else "FILE"
-                logger.error(f"    [{path_type}] {f}")
-        else:
-            logger.error(f"  Directory doesn't exist: {self.musetalk_root}")
-        
-        return None
-    
+    def _get_ffmpeg_path(self):
+        musetalk_abs = os.path.abspath(self.musetalk_root)
+        ffmpeg_dir = os.path.join(musetalk_abs, "ffmpeg", "bin")
+        ffmpeg_exe = os.path.join(ffmpeg_dir, "ffmpeg.exe")
+        if os.path.exists(ffmpeg_exe): return ffmpeg_dir, ffmpeg_exe
+        return None, None
+
     async def generate(
         self,
-        avatar_image: str,
+        input_source: str,  # CHANGED NAME: Can be Image (.png) OR Video (.mp4)
         audio_path: str,
-        output_path: str,
-        video_type: str = "standard"
+        output_path: str
     ) -> Optional[str]:
         """
-        Generate lip-synced video from avatar image and audio.
-        MuseTalk automatically determines duration based on audio.
+        Generate lip-synced video using MuseTalk.
+        input_source: Path to 'base_listening.mp4' (video) OR 'avatar.png' (image)
         """
-        
-        try:
-            logger.info(f"[MuseTalk] Generating video...")
-            logger.info(f"  Avatar: {avatar_image}")
-            logger.info(f"  Audio: {audio_path}")
-            logger.info(f"  Output: {output_path}")
-            logger.info(f"  Type: {video_type}")
-            
-            # Validate inputs
-            if not os.path.exists(avatar_image):
-                logger.error(f"[MuseTalk] Avatar not found: {avatar_image}")
+        async with self.lock:
+            config_path = None
+            try:
+                # --- 0. RESOLVE PATHS ---
+                musetalk_abs = os.path.abspath(self.musetalk_root)
+                if not os.path.exists(input_source):
+                    logger.error(f"[MuseTalk] Input source not found: {input_source}")
+                    return None
+                
+                # FORCE FORWARD SLASHES
+                input_abs = os.path.abspath(input_source).replace("\\", "/")
+                audio_abs = os.path.abspath(audio_path).replace("\\", "/")
+                output_abs = os.path.abspath(output_path).replace("\\", "/")
+                
+                # Filename variations for bbox_shift lookup
+                input_basename = os.path.basename(input_abs)
+                input_name_no_ext = os.path.splitext(input_basename)[0]
+
+                # --- 1. SETUP FFMPEG ---
+                ffmpeg_dir, ffmpeg_exe = self._get_ffmpeg_path()
+                use_local_ffmpeg = True if ffmpeg_dir else False
+
+                # --- 2. PREPARE MODEL PATHS ---
+                unet_path = os.path.join(musetalk_abs, "models", "musetalkV15", "unet.pth")
+                musetalk_json = os.path.join(musetalk_abs, "models", "musetalkV15", "musetalk.json")
+                whisper_path = os.path.join(musetalk_abs, "models", "whisper")
+
+                # --- 3. CREATE CONFIGURATION ---
+                os.makedirs(os.path.dirname(output_abs), exist_ok=True)
+
+                # [CRITICAL] Catch-all bbox_shift for both Image and Video inputs
+                bbox_shift_config = {
+                    input_abs: 0,
+                    input_basename: 0,
+                    input_name_no_ext: 0,
+                    "video_path": 0 
+                }
+
+                config_payload = {
+                    "task_type": "dubbing",
+                    "video_path": input_abs, # MuseTalk accepts video path here for Dubbing
+                    "audio_path": audio_abs,
+                    "bbox_shift": bbox_shift_config, 
+                    "video_out_path": output_abs,
+                    "fp16": True,
+                }
+
+                with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.yaml') as tmp_config:
+                    yaml.dump(config_payload, tmp_config, default_flow_style=False)
+                    config_path = tmp_config.name
+
+                logger.info(f"[MuseTalk] Generating video...")
+                logger.info(f"  Input: {input_basename}")
+
+                # --- 4. EXECUTE INFERENCE ---
+                cmd = [
+                    self.python_bin,
+                    "-m", "scripts.inference",
+                    "--inference_config", config_path.replace("\\", "/"), 
+                    "--gpu", str(self.gpu),
+                    "--unet_config", musetalk_json.replace("\\", "/"),
+                    "--unet_model_path", unet_path.replace("\\", "/"),
+                    "--whisper_dir", whisper_path.replace("\\", "/")
+                ]
+
+                env = os.environ.copy()
+                env["PYTHONPATH"] = musetalk_abs + os.pathsep + env.get("PYTHONPATH", "")
+                if use_local_ffmpeg:
+                    env["PATH"] = ffmpeg_dir + os.pathsep + env.get("PATH", "")
+
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    cmd,
+                    cwd=musetalk_abs,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=600 
+                )
+
+                if result.returncode != 0:
+                    logger.error(f"[MuseTalk] FAILED: {result.stderr[-1000:]}")
+                    return None
+
+                if not os.path.exists(output_abs):
+                    logger.error(f"[MuseTalk] Output not found: {output_abs}")
+                    return None
+
+                logger.info(f"✓ [MuseTalk] Success: {output_path}")
+                return output_path
+
+            except Exception as e:
+                logger.error(f"[MuseTalk] Error: {e}", exc_info=True)
                 return None
-            
-            if not os.path.exists(audio_path):
-                logger.error(f"[MuseTalk] Audio not found: {audio_path}")
-                return None
-            
-            # Check inference script
-            if not self.inference_script or not os.path.exists(self.inference_script):
-                logger.error(f"[MuseTalk] Inference script not found!")
-                logger.error(f"  Expected: {self.inference_script}")
-                logger.error(f"  Make sure MuseTalk is properly installed")
-                return None
-            
-            file_size = os.path.getsize(audio_path)
-            logger.info(f"[MuseTalk] Audio file size: {file_size} bytes")
-            
-            # Create output directory
-            output_dir = os.path.dirname(output_path)
-            os.makedirs(output_dir, exist_ok=True)
-            logger.info(f"[MuseTalk] Output directory: {output_dir}")
-            
-            # ✅ FIXED: Use correct inference.py path directly
-            cmd = [
-                self.python_bin,
-                self.inference_script,  # ← Direct path to inference.py
-                "--avatar", avatar_image,
-                "--audio", audio_path,
-                "--output", output_path,
-                "--gpu", str(self.gpu),
-            ]
-            
-            # Add optional flags
-            if self.fp16:
-                cmd.append("--fp16")
-                logger.info(f"[MuseTalk] Using FP16 precision")
-            
-            if video_type == "hd":
-                cmd.extend(["--resolution", "1024"])
-                logger.info(f"[MuseTalk] Using HD resolution (1024)")
-            elif video_type == "fast":
-                cmd.extend(["--fps", "24"])
-                logger.info(f"[MuseTalk] Using fast FPS (24)")
-            
-            logger.info(f"[MuseTalk] Command: {' '.join(cmd[:7])}...")
-            
-            # Execute with timeout (5 minutes max for generation)
-            result = await asyncio.to_thread(
-                subprocess.run,
-                cmd,
-                cwd=self.musetalk_root,  # Run FROM MuseTalk directory
-                capture_output=True,
-                text=True,
-                timeout=300
-            )
-            
-            # Check result
-            if result.returncode != 0:
-                logger.error(f"[MuseTalk] FAILED (code {result.returncode})")
-                logger.error(f"[MuseTalk] STDERR: {result.stderr}")
-                logger.error(f"[MuseTalk] STDOUT: {result.stdout}")
-                return None
-            
-            # Verify output file exists and has content
-            if not os.path.exists(output_path):
-                logger.error(f"[MuseTalk] Output file NOT created: {output_path}")
-                logger.error(f"  Check the MuseTalk command output above for errors")
-                return None
-            
-            file_size = os.path.getsize(output_path)
-            if file_size < 100 * 1024:  # Less than 100KB is suspicious
-                logger.warning(f"[MuseTalk] Output file is very small: {file_size} bytes")
-            
-            logger.info(f"✓ [MuseTalk] Video generated successfully!")
-            logger.info(f"  Path: {output_path}")
-            logger.info(f"  Size: {file_size} bytes ({file_size / (1024*1024):.2f} MB)")
-            
-            return output_path
-        
-        except subprocess.TimeoutExpired:
-            logger.error(f"[MuseTalk] TIMEOUT after 300 seconds")
-            return None
-        except Exception as e:
-            logger.error(f"[MuseTalk] EXCEPTION: {e}", exc_info=True)
-            return None
+            finally:
+                if config_path and os.path.exists(config_path):
+                    try: os.remove(config_path)
+                    except: pass
     
     async def generate_listening_video(
         self,
@@ -179,15 +241,10 @@ class MuseTalkAPI:
     ) -> Optional[str]:
         """
         Generate listening/nodding video (interviewer listening to candidate).
-        Uses silent audio, generates head nod animation.
         """
-        
         try:
             logger.info(f"[MuseTalk] Generating listening video...")
-            logger.info(f"  Duration: {audio_duration_seconds}s")
-            logger.info(f"  Avatar: {avatar_image}")
             
-            # Create silent audio file for listening duration
             silence_audio_path = os.path.join(
                 os.path.dirname(output_path),
                 "silence.wav"
@@ -198,7 +255,6 @@ class MuseTalkAPI:
                 audio_duration_seconds
             )
             
-            # Generate video with silent audio (creates natural listening/nodding)
             output = await self.generate(
                 avatar_image=avatar_image,
                 audio_path=silence_audio_path,
@@ -206,11 +262,9 @@ class MuseTalkAPI:
                 video_type="standard"
             )
             
-            # Clean up silence audio
             if os.path.exists(silence_audio_path):
                 os.remove(silence_audio_path)
             
-            logger.info(f"✓ [MuseTalk] Listening video generated!")
             return output
         
         except Exception as e:
@@ -219,18 +273,12 @@ class MuseTalkAPI:
     
     async def _create_silent_audio(self, output_path: str, duration_seconds: float) -> bool:
         """Create a silent WAV audio file for listening animations."""
-        
         try:
-            logger.info(f"[Audio] Creating silent audio: {duration_seconds}s")
-            
-            # Fallback: create minimal WAV header
-            logger.info(f"[Audio] Creating minimal WAV header")
-            
             sample_rate = 22050
             duration = int(duration_seconds)
             num_samples = sample_rate * duration
             
-            # WAV header (44 bytes)
+            # Minimal WAV header creation
             wav_header = bytearray()
             wav_header.extend(b"RIFF")
             wav_header.extend((36 + num_samples * 2).to_bytes(4, 'little'))
@@ -246,122 +294,56 @@ class MuseTalkAPI:
             wav_header.extend(b"data")
             wav_header.extend((num_samples * 2).to_bytes(4, 'little'))
             
-            # Add silent samples (zeros)
             with open(output_path, 'wb') as f:
                 f.write(wav_header)
                 f.write(bytes(num_samples * 2))
             
-            logger.info(f"✓ [Audio] Silent WAV created: {output_path}")
             return True
-        
         except Exception as e:
             logger.error(f"[Audio] Silent audio creation failed: {e}", exc_info=True)
             return False
-    
-    def get_musetalk_status(self) -> dict:
-        """Check if MuseTalk is properly installed and configured."""
-        status = {
-            "installed": os.path.exists(self.musetalk_root),
-            "inference_script": self.inference_script is not None and os.path.exists(self.inference_script),
-            "checkpoints_dir": os.path.exists(os.path.join(self.musetalk_root, "checkpoints")),
-            "gpu_available": self._check_gpu_available(),
-        }
-        
-        logger.info(f"[MuseTalk] Status check:")
-        for key, value in status.items():
-            logger.info(f"  {key}: {value}")
-        
-        return status
-    
-    def _check_gpu_available(self) -> bool:
-        """Check if CUDA GPU is available."""
-        try:
-            import torch
-            available = torch.cuda.is_available()
-            logger.info(f"[GPU] CUDA available: {available}")
-            return available
-        except Exception as e:
-            logger.debug(f"[GPU] Check failed: {e}")
-            return False
-
 
 # ===== PIPER TTS API - ACTUAL AUDIO GENERATION =====
 
 class PiperTTS:
-    """Text-to-Speech using Piper TTS (offline, fast, high quality)"""
+    """Text-to-Speech using Piper TTS"""
     
     def __init__(self):
         self.voice = settings.PIPER_VOICE
         self.speed = settings.PIPER_SPEED
         self.piper_bin = settings.PIPER_BIN
-        
-        logger.info(f"✓ PiperTTS initialized:")
-        logger.info(f"  Voice: {self.voice}")
-        logger.info(f"  Speed: {self.speed}")
-        logger.info(f"  Executable: {self.piper_bin}")
-        
-        # Create audio cache directory
         os.makedirs(settings.AUDIO_CACHE_DIR, exist_ok=True)
     
     def _find_piper_executable(self) -> Optional[str]:
-        """Find Piper executable in system."""
-        
-        # First, try the configured path
         if self.piper_bin and os.path.exists(self.piper_bin):
-            logger.info(f"✓ [Piper] Found at configured path: {self.piper_bin}")
             return self.piper_bin
         
-        # Try to find in PATH using 'where' (Windows) or 'which' (Linux/Mac)
         try:
-            if os.name == 'nt':  # Windows
-                result = subprocess.run(['where', 'piper'], capture_output=True, text=True, timeout=5)
-            else:  # Linux/Mac
-                result = subprocess.run(['which', 'piper'], capture_output=True, text=True, timeout=5)
-            
+            cmd = ['where', 'piper'] if os.name == 'nt' else ['which', 'piper']
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
             if result.returncode == 0:
-                piper_path = result.stdout.strip()
-                logger.info(f"✓ [Piper] Found in PATH: {piper_path}")
-                return piper_path
-        
-        except Exception as e:
-            logger.debug(f"[Piper] PATH search failed: {e}")
-        
-        logger.warning(f"✗ [Piper] Executable not found!")
-        logger.warning(f"  Install with: pip install piper-tts")
+                return result.stdout.strip()
+        except Exception:
+            pass
         return None
     
     async def synthesize(self, text: str, output_path: str) -> Optional[str]:
-        """Synthesize speech from text using Piper TTS."""
-        
         try:
-            # Clean the text input
             clean_text = text.strip()
-            
-            logger.info(f"[Piper] Synthesizing TTS...")
-            logger.info(f"  Text: {clean_text[:50]}...")
-            logger.info(f"  Output: {output_path}")
-            
-            # Create output directory
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             
-            # Find piper executable
             piper_bin = self._find_piper_executable()
             if not piper_bin:
-                logger.error(f"✗ [Piper] Executable not found, cannot synthesize")
+                logger.error(f"✗ [Piper] Executable not found")
                 return None
             
-            # Build command
             cmd = [
                 piper_bin,
                 "--model", self.voice,
                 "--output_file", output_path,
-                "--length_scale", str(self.speed) 
+                "--length_scale", str(self.speed),
             ]
             
-            logger.info(f"✓ [Piper] Found in PATH: {piper_bin}")
-            logger.info(f"[Piper] Command: {' '.join(cmd[:3])}...")
-            
-            # Execute Piper
             result = await asyncio.to_thread(
                 subprocess.run,
                 cmd,
@@ -371,123 +353,80 @@ class PiperTTS:
                 timeout=60
             )
             
-            if result.returncode != 0:
+            if result.returncode != 0 or not os.path.exists(output_path):
                 logger.error(f"✗ [Piper] FAILED (code {result.returncode})")
-                logger.error(f"  STDERR: {result.stderr}")
                 return None
-            
-            if not os.path.exists(output_path):
-                logger.error(f"✗ [Piper] Output file not created: {output_path}")
-                return None
-            
-            file_size = os.path.getsize(output_path)
-            logger.info(f"✓ [Piper] Audio generated!")
-            logger.info(f"  Path: {output_path}")
-            logger.info(f"  Size: {file_size} bytes ({file_size / 1024:.1f} KB)")
             
             return output_path
-        
-        except subprocess.TimeoutExpired:
-            logger.error(f"✗ [Piper] TIMEOUT after 60 seconds")
-            return None
         except Exception as e:
             logger.error(f"✗ [Piper] EXCEPTION: {e}", exc_info=True)
             return None
-    
-    def get_piper_status(self) -> dict:
-        """Check if Piper is properly installed and available."""
-        piper_bin = self._find_piper_executable()
-        
-        status = {
-            "available": piper_bin is not None,
-            "executable": piper_bin,
-            "voice": self.voice,
-            "audio_cache_dir": settings.AUDIO_CACHE_DIR,
-            "cache_writable": os.access(settings.AUDIO_CACHE_DIR, os.W_OK),
-        }
-        
-        logger.info(f"[Piper] Status check:")
-        for key, value in status.items():
-            logger.info(f"  {key}: {value}")
-        
-        return status
-
 
 # ===== WHISPER API - SPEECH TO TEXT =====
 
 class WhisperAPI:
-    """Speech-to-Text using OpenAI Whisper"""
+    """Speech-to-Text using OpenAI Whisper Python Library (No Subprocess)"""
     
     def __init__(self):
         self.api_key = settings.OPENAI_API_KEY
-        self.model = settings.WHISPER_MODEL
-        logger.info(f"✓ WhisperAPI initialized: model={self.model}")
+        self.model_name = settings.WHISPER_MODEL
+        self.model = None
+        
+        # Inject FFmpeg path once during init
+        self._inject_ffmpeg()
+        logger.info(f"✓ WhisperAPI initialized: model={self.model_name}")
+
+    def _inject_ffmpeg(self):
+        """Inject local FFmpeg into PATH"""
+        ffmpeg_path = os.path.join(settings.MUSETALK_ROOT, "ffmpeg", "bin")
+        if os.path.exists(ffmpeg_path):
+            logger.info(f"[Whisper] Injecting local FFmpeg into PATH: {ffmpeg_path}")
+            os.environ["PATH"] = ffmpeg_path + os.pathsep + os.environ["PATH"]
+
+    def _load_model(self):
+        """Lazy load model to avoid locking startup"""
+        if self.model is None:
+            import whisper
+            logger.info(f"[Whisper] Loading model '{self.model_name}' into memory...")
+            self.model = whisper.load_model(self.model_name)
     
     async def transcribe_full(self, audio_bytes: bytes) -> dict:
-        """Transcribe full audio from combined chunks using Whisper CLI."""
+        """Transcribe audio bytes using Whisper Python API"""
+        import tempfile
+        import whisper
+        temp_path = None
         
         try:
-            import tempfile
-            
+            # Load model if not ready (runs in thread to avoid blocking)
+            if self.model is None:
+                await asyncio.to_thread(self._load_model)
+
             # Save audio to temp file
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
                 f.write(audio_bytes)
                 temp_path = f.name
             
-            logger.info(f"[Whisper] Transcribing: {temp_path}")
-            logger.info(f"  Audio size: {len(audio_bytes)} bytes")
+            logger.info(f"[Whisper] Transcribing file...")
             
-            # Call Whisper CLI
-            cmd = [
-                "whisper",
-                temp_path,
-                "--model", self.model,
-                "--output_format", "json",
-                "--fp16"
-            ]
+            # Run transcription in thread
+            def _run_transcribe():
+                return self.model.transcribe(temp_path, fp16=False) 
             
-            logger.info(f"[Whisper] Command: {' '.join(cmd[:3])}...")
+            result = await asyncio.to_thread(_run_transcribe)
+            text = result["text"].strip()
             
-            result = await asyncio.to_thread(
-                subprocess.run,
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=120
-            )
-            
-            # Clean up temp file
-            try:
-                os.unlink(temp_path)
-            except:
-                pass
-            
-            if result.returncode != 0:
-                logger.error(f"[Whisper] Failed: {result.stderr}")
-                return {"full_transcription": ""}
-            
-            # Parse JSON output
-            import json
-            
-            # Look for JSON file in same directory as audio
-            json_file = temp_path.replace(".wav", ".json")
-            if os.path.exists(json_file):
-                with open(json_file, 'r') as f:
-                    output = json.load(f)
-                os.unlink(json_file)
-            else:
-                # Try parsing from stdout
-                output = json.loads(result.stdout)
-            
-            transcription = output.get("text", "")
-            logger.info(f"✓ [Whisper] Transcribed: {transcription[:100]}...")
-            
-            return {"full_transcription": transcription}
+            logger.info(f"✓ [Whisper] Transcribed: {text[:100]}...")
+            return {"full_transcription": text}
         
         except Exception as e:
             logger.error(f"[Whisper] Error: {e}", exc_info=True)
             return {"full_transcription": ""}
-
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except:
+                    pass
 
 # ===== HUGGINGFACE API - LLM INFERENCE =====
 
@@ -496,65 +435,84 @@ class HuggingFaceAPI:
     
     def __init__(self):
         self.api_key = settings.HUGGINGFACE_API_KEY
-        self.model = settings.HUGGINGFACE_MODEL
+        # CHANGED: Use Mistral Instruct v0.2 which supports text-generation better on free tier
+        self.model = "mistralai/Mistral-7B-Instruct-v0.2" 
+        self.client = InferenceClient(token=self.api_key)
         logger.info(f"✓ HuggingFaceAPI initialized: model={self.model}")
     
-    async def generate_questions(self, job_description: str) -> list:
-        """Generate 5 interview questions based on job description."""
-        
+    async def generate(self, job_description: str) -> Union[str, list]:
+        """
+        Generate 5 interview questions based on job description.
+        """
         try:
-            logger.info(f"[HF] Generating interview questions...")
-            logger.info(f"  Job: {job_description[:100]}...")
+            logger.info(f"[HF] Generating interview questions via API...")
             
-            questions = [
-                f"Tell me about your experience relevant to this {job_description[:30]} position and how you see yourself contributing to our team.",
-                f"Describe a challenging project you've worked on that relates to {job_description[:30]}. How did you approach it and what did you learn?",
-                f"How do you handle conflicts or disagreements with team members when working on {job_description[:30]} projects?",
-                f"What are your key strengths and areas for improvement when it comes to {job_description[:30]}?",
-                f"Do you have any questions for me about this {job_description[:30]} role or our company?"
-            ]
+            # Mistral Instruct Format
+            prompt = f"<s>[INST] You are an expert technical interviewer. Generate exactly 5 distinct technical interview questions for a candidate applying for this role: '{job_description}'. Return ONLY the questions as a numbered list. [/INST]"
             
-            logger.info(f"✓ [HF] Generated {len(questions)} questions")
-            return questions
+            response = await asyncio.to_thread(
+                self.client.text_generation,
+                prompt,
+                model=self.model,
+                max_new_tokens=512,
+                temperature=0.7,
+                return_full_text=False
+            )
+            
+            # Parse and clean
+            raw_text = response.strip()
+            lines = [line.strip() for line in raw_text.split('\n') if line.strip()]
+            
+            cleaned_questions = []
+            for line in lines:
+                # Remove numbers and dots (e.g. "1. Question" -> "Question")
+                clean = re.sub(r'^\d+[\.\)\-]\s*', '', line)
+                if clean and len(clean) > 10: # Filter out short garbage
+                    cleaned_questions.append(clean)
+            
+            final_list = cleaned_questions[:5]
+            
+            if not final_list:
+                 raise Exception("No questions generated")
+
+            logger.info(f"✓ [HF] Generated {len(final_list)} questions")
+            return "\n".join(final_list)
         
         except Exception as e:
             logger.error(f"[HF] Question generation error: {e}")
-            return []
+            # Fallback if API fails
+            return "Tell me about yourself.\nWhat are your strengths?\nDescribe a challenge you faced.\nWhy do you want this job?\nAny questions for us?"
     
     async def evaluate_response(self, question: str, response: str, job_description: str) -> dict:
-        """Evaluate candidate response to interview question."""
-        
+        """Evaluate candidate response using LLM."""
         try:
             logger.info(f"[HF] Evaluating response...")
-            logger.info(f"  Q: {question[:50]}...")
-            logger.info(f"  R: {response[:50]}...")
             
-            # Simple evaluation based on response length and keywords
-            score = 5  # Base score
+            if len(response.strip()) < 5:
+                return {"score": 2, "marks": "2/10", "feedback": "Response too short."}
+
+            prompt = f"<s>[INST] Evaluate this interview answer.\nRole: {job_description}\nQuestion: {question}\nAnswer: {response}\n\nOutput STRICTLY in this format:\nSCORE: [1-10]\nFEEDBACK: [One sentence feedback] [/INST]"
             
-            if len(response) < 20:
-                score = 2  # Very short answer
-            elif len(response) < 50:
-                score = 4  # Short answer
-            elif len(response) < 100:
-                score = 6  # Moderate answer
-            elif len(response) < 200:
-                score = 7  # Good answer
-            else:
-                score = 8  # Detailed answer
+            output = await asyncio.to_thread(
+                self.client.text_generation,
+                prompt,
+                model=self.model,
+                max_new_tokens=150,
+                temperature=0.3
+            )
             
-            # Bonus for relevant keywords
-            job_keywords = job_description.lower().split()[:5]
-            response_lower = response.lower()
+            text = output.strip()
+            score = 5
+            feedback = "Good attempt."
             
-            keyword_matches = sum(1 for kw in job_keywords if kw in response_lower)
-            if keyword_matches > 0:
-                score = min(10, score + keyword_matches)
-            
-            feedback = self._generate_feedback(score, len(response))
-            
-            logger.info(f"✓ [HF] Score: {score}/10")
-            logger.info(f"  Feedback: {feedback}")
+            # Robust parsing
+            score_match = re.search(r'SCORE:\s*(\d+)', text, re.IGNORECASE)
+            if score_match:
+                score = int(score_match.group(1))
+                
+            feedback_match = re.search(r'FEEDBACK:\s*(.*)', text, re.IGNORECASE)
+            if feedback_match:
+                feedback = feedback_match.group(1).strip()
             
             return {
                 "score": score,
@@ -564,22 +522,4 @@ class HuggingFaceAPI:
         
         except Exception as e:
             logger.error(f"[HF] Evaluation error: {e}")
-            return {
-                "score": 5,
-                "marks": "5/10",
-                "feedback": "Unable to evaluate."
-            }
-    
-    def _generate_feedback(self, score: int, response_length: int) -> str:
-        """Generate contextual feedback based on score and response length."""
-        
-        if score <= 2:
-            return "Your response was too brief. Try to provide more details and examples."
-        elif score <= 4:
-            return "Good start! Consider adding more specific examples from your experience."
-        elif score <= 6:
-            return "That's a solid response. You could strengthen it with more concrete examples."
-        elif score <= 8:
-            return "Great answer! You provided good details and demonstrated relevant experience."
-        else:
-            return "Excellent response! You clearly articulated your experience and skills."
+            return {"score": 5, "marks": "5/10", "feedback": "Evaluation unavailable."}
